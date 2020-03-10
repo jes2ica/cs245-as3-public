@@ -55,6 +55,7 @@ public class TransactionManager {
 	private HashMap<Long, TaggedValue> latestValues;
 	private LinkedHashMap<Long, ArrayList<Record>> txnLogRecords;
 	private HashSet<Long> successfulTxns;
+	private LinkedHashSet<Long> waiting;
 	/**
 	  * Hold on to writesets until commit.
 	  */
@@ -66,6 +67,7 @@ public class TransactionManager {
 		writesets = new HashMap<>();
 		successfulTxns = new HashSet<>();
 		txnLogRecords = new LinkedHashMap<>();
+		waiting = new LinkedHashSet<>();
 		//see initAndRecover
 		latestValues = null;
 	}
@@ -77,7 +79,6 @@ public class TransactionManager {
 	public void initAndRecover(StorageManager sm, LogManager lm) {
 		this.sm = sm;
 		this.lm = lm;
-
 		latestValues = sm.readStoredTable();
 		redoLogs(lm, sm);
 	}
@@ -117,14 +118,13 @@ public class TransactionManager {
 	public void commit(long txID) {
 		ArrayList<WritesetEntry> writeset = writesets.get(txID);
 		if (writeset != null) {
+			appendRecord(lm, txID);
 			for (WritesetEntry x : writeset) {
 				//tag is unused in this implementation:
 				long tag = 0;
 				latestValues.put(x.key, new TaggedValue(tag, x.value));
 			}
 			writesets.remove(txID);
-
-			appendRecord(lm, txID);
 		}
 	}
 	/**
@@ -140,7 +140,14 @@ public class TransactionManager {
 	 * These calls are in order of writes to a key and will occur once for every such queued write, unless a crash occurs.
 	 */
 	public void writePersisted(long key, long persisted_tag, byte[] persisted_value) {
-//		System.out.println("persisted: " + key + ":" + persisted_value);
+		if (waiting.isEmpty()) return;
+		synchronized(waiting) {
+			if (waiting.iterator().next() == persisted_tag) {
+				long next = persisted_tag;
+				lm.setLogTruncationOffset((int) next);
+			}
+			waiting.remove(persisted_tag);
+		}
 	}
 
 	private void appendRecord(LogManager lm, long txID) {
@@ -158,9 +165,16 @@ public class TransactionManager {
 			ret.put(r.value);
 			offsets.add(lm.appendLogRecord(ret.array()));
 		}
+		for (int i = 0; i < offsets.size() - 1; i++) {
+			waiting.add((long) offsets.get(i));
+		}
+		for (int i = 0; i < offsets.size() - 1; i++) {
+			sm.queueWrite(txnLogRecords.get(txID).get(i).key, offsets.get(i), txnLogRecords.get(txID).get(i).value);
+		}
 	}
 
 	private void redoLogs(LogManager lm, StorageManager sm) {
+		HashMap<Long, ArrayList<Integer>> tags = new HashMap<>();
 		int offset = lm.getLogTruncationOffset();
 		while (offset < lm.getLogEndOffset()) {
 			byte[] length = lm.readLogRecord(offset, Long.BYTES);
@@ -168,22 +182,27 @@ public class TransactionManager {
 			byte[] content = lm.readLogRecord(offset + Long.BYTES, (int) bb.getLong());
 			Record record = deserialize(content);
 			String recordStr = new String(record.value);
-			if (!recordStr.startsWith("COMMITED")) {
+			if (recordStr.startsWith("COMMITED")) {
+				successfulTxns.add(record.txID);
+			} else {
 				txnLogRecords.putIfAbsent(record.txID, new ArrayList<>());
 				txnLogRecords.get(record.txID).add(record);
-			} else {
-				successfulTxns.add(record.txID);
+				tags.putIfAbsent(record.txID, new ArrayList<>());
+				tags.get(record.txID).add(offset);
 			}
-			offset += Long.BYTES + content.length;
+			offset = Math.max(offset + Long.BYTES + content.length, lm.getLogTruncationOffset());
 		}
 		for (long txID : txnLogRecords.keySet()) {
 			if (!successfulTxns.contains(txID)) {
 				continue;
 			}
 			ArrayList<Record> records = txnLogRecords.get(txID);
+			ArrayList<Integer> offsets = tags.get(txID);
+			int i = 0;
 			for (Record record : records) {
-				latestValues.put(record.key, new TaggedValue(0, record.value));
-				sm.queueWrite(record.key, 0, record.value);
+				int tag = offsets.get(i++);
+				latestValues.put(record.key, new TaggedValue(tag, record.value));
+				sm.queueWrite(record.key, tag, record.value);
 			}
 		}
 	}
