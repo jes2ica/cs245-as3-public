@@ -1,8 +1,8 @@
 package cs245.as3;
 
+import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.*;
 
 import cs245.as3.driver.LogManagerImpl;
 import cs245.as3.driver.LogManagerTests;
@@ -53,7 +53,8 @@ public class TransactionManager {
 	  * Holds the latest value for each key.
 	  */
 	private HashMap<Long, TaggedValue> latestValues;
-	private HashMap<Long, ArrayList<Record>> txnLogRecords;
+	private LinkedHashMap<Long, ArrayList<Record>> txnLogRecords;
+	private HashSet<Long> successfulTxns;
 	/**
 	  * Hold on to writesets until commit.
 	  */
@@ -63,6 +64,8 @@ public class TransactionManager {
 
 	public TransactionManager() {
 		writesets = new HashMap<>();
+		successfulTxns = new HashSet<>();
+		txnLogRecords = new LinkedHashMap<>();
 		//see initAndRecover
 		latestValues = null;
 	}
@@ -83,8 +86,7 @@ public class TransactionManager {
 	 * Indicates the start of a new transaction. We will guarantee that txID always increases (even across crashes)
 	 */
 	public void start(long txID) {
-		String str = "STARTED:" + txID;
-		appendRecord(lm, 0, 0, str.getBytes());
+		txnLogRecords.put(txID, new ArrayList<>());
 	}
 
 	/**
@@ -107,6 +109,7 @@ public class TransactionManager {
 			writesets.put(txID, writeset);
 		}
 		writeset.add(new WritesetEntry(key, value));
+		txnLogRecords.get(txID).add(new Record(txID, key, value));
 	}
 	/**
 	 * Commits a transaction, and makes its writes visible to subsequent read operations.\
@@ -118,18 +121,17 @@ public class TransactionManager {
 				//tag is unused in this implementation:
 				long tag = 0;
 				latestValues.put(x.key, new TaggedValue(tag, x.value));
-				sm.queueWrite(x.key, tag, x.value);
-				appendRecord(lm, txID, x.key, x.value);
 			}
-			String str = "COMMITED:" + txID;
-			appendRecord(lm, txID, 0, str.getBytes());
 			writesets.remove(txID);
+
+			appendRecord(lm, txID);
 		}
 	}
 	/**
 	 * Aborts a transaction.
 	 */
 	public void abort(long txID) {
+		txnLogRecords.remove(txID);
 		writesets.remove(txID);
 	}
 
@@ -141,16 +143,21 @@ public class TransactionManager {
 //		System.out.println("persisted: " + key + ":" + persisted_value);
 	}
 
-	private void appendRecord(LogManager lm, long txID, long key, byte[] value) {
-		Record r = new Record(txID, key, value);
-		byte[] r_byte = r.serialize();
-		int r_len = r_byte.length;
-		ByteBuffer ret = ByteBuffer.allocate(Long.BYTES + r_len);
-		ret.putLong(r_len);
-		ret.putLong(txID);
-		ret.putLong(key);
-		ret.put(value);
-		lm.appendLogRecord(ret.array());
+	private void appendRecord(LogManager lm, long txID) {
+		String str = "COMMITED:" + txID;
+		txnLogRecords.get(txID).add(new Record(txID, 0, str.getBytes()));
+
+		List<Integer> offsets = new ArrayList<>();
+		for (Record r : txnLogRecords.get(txID)) {
+			byte[] r_byte = r.serialize();
+			int r_len = r_byte.length;
+			ByteBuffer ret = ByteBuffer.allocate(Long.BYTES + r_len);
+			ret.putLong(r_len);
+			ret.putLong(txID);
+			ret.putLong(r.key);
+			ret.put(r.value);
+			offsets.add(lm.appendLogRecord(ret.array()));
+		}
 	}
 
 	private void redoLogs(LogManager lm, StorageManager sm) {
@@ -160,9 +167,21 @@ public class TransactionManager {
 			ByteBuffer bb = ByteBuffer.wrap(length);
 			byte[] content = lm.readLogRecord(offset + Long.BYTES, (int) bb.getLong());
 			Record record = deserialize(content);
-			offset += Long.BYTES + content.length;
 			String recordStr = new String(record.value);
-			if (!recordStr.startsWith("STARTED") && !recordStr.startsWith("COMMITED")) {
+			if (!recordStr.startsWith("COMMITED")) {
+				txnLogRecords.putIfAbsent(record.txID, new ArrayList<>());
+				txnLogRecords.get(record.txID).add(record);
+			} else {
+				successfulTxns.add(record.txID);
+			}
+			offset += Long.BYTES + content.length;
+		}
+		for (long txID : txnLogRecords.keySet()) {
+			if (!successfulTxns.contains(txID)) {
+				continue;
+			}
+			ArrayList<Record> records = txnLogRecords.get(txID);
+			for (Record record : records) {
 				latestValues.put(record.key, new TaggedValue(0, record.value));
 				sm.queueWrite(record.key, 0, record.value);
 			}
