@@ -1,6 +1,8 @@
 package cs245.as3;
 
+import java.io.IOException;
 import java.lang.reflect.Array;
+import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.*;
 
@@ -119,6 +121,7 @@ public class TransactionManager {
 		ArrayList<WritesetEntry> writeset = writesets.get(txID);
 		if (writeset != null) {
 			appendRecord(lm, txID);
+
 			for (WritesetEntry x : writeset) {
 				//tag is unused in this implementation:
 				long tag = 0;
@@ -151,25 +154,53 @@ public class TransactionManager {
 	}
 
 	private void appendRecord(LogManager lm, long txID) {
+		HashSet<Long> keySet = new HashSet<>();
+		List<Record> recordsList = txnLogRecords.get(txID);
+		List<Record> results = new ArrayList<>();
+		for (int i = recordsList.size() - 1; i >= 0; i--) {
+			if (keySet.add(recordsList.get(i).key)) {
+				results.add(recordsList.get(i));
+			}
+		}
+//		System.out.println("results: " + results.size());
 		String str = "COMMITED:" + txID;
-		txnLogRecords.get(txID).add(new Record(txID, 0, str.getBytes()));
+		results.add(new Record(txID, 0, str.getBytes()));
 
 		List<Integer> offsets = new ArrayList<>();
-		for (Record r : txnLogRecords.get(txID)) {
-			byte[] r_byte = r.serialize();
-			int r_len = r_byte.length;
-			ByteBuffer ret = ByteBuffer.allocate(Long.BYTES + r_len);
-			ret.putLong(r_len);
-			ret.putLong(txID);
-			ret.putLong(r.key);
-			ret.put(r.value);
-			offsets.add(lm.appendLogRecord(ret.array()));
+		int records = results.size(), cur = 0, offset = lm.getLogEndOffset();
+		while (cur < records) {
+			int curLen = 0, start = cur, end = cur;
+			Record r = results.get(cur);
+			int recordLen = 3 * Long.BYTES + r.value.length;
+			while (curLen +  recordLen < 128) {
+				end = cur;
+				curLen += recordLen;
+				cur++;
+				if (cur == records) {
+					break;
+				}
+				r = results.get(cur);
+				recordLen = 3 * Long.BYTES + r.value.length;
+			}
+//			System.out.println("s: " + start + ":" + end + ":" + curLen);
+			ByteBuffer ret = ByteBuffer.allocate(curLen);
+			for (int i = start; i <= end; i++) {
+				Record record = results.get(i);
+				int r_len = 2 * Long.BYTES + record.value.length;
+				ret.putLong(r_len);
+				ret.putLong(txID);
+				ret.putLong(record.key);
+				ret.put(record.value);
+				offsets.add(offset);
+				offset += Long.BYTES + r_len;
+			}
+			lm.appendLogRecord(ret.array());
 		}
 		for (int i = 0; i < offsets.size() - 1; i++) {
 			waiting.add((long) offsets.get(i));
 		}
 		for (int i = 0; i < offsets.size() - 1; i++) {
-			sm.queueWrite(txnLogRecords.get(txID).get(i).key, offsets.get(i), txnLogRecords.get(txID).get(i).value);
+			sm.queueWrite(results.get(i).key, offsets.get(i), results.get(i).value);
 		}
 	}
 
