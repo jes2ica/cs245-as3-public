@@ -44,11 +44,17 @@ public class TransactionManager {
 		}
 
 		public byte[] serialize() {
-			ByteBuffer ret = ByteBuffer.allocate(2 * Long.BYTES + value.length);
+			ByteBuffer ret = ByteBuffer.allocate(len());
+			byte num = (byte)(len() - Byte.BYTES);
+			ret.put(num);
 			ret.putLong(txID);
 			ret.putLong(key);
 			ret.put(value);
 			return ret.array();
+		}
+
+		public int len() {
+			return Byte.BYTES + 2 * Long.BYTES + value.length;
 		}
 	}
 	/**
@@ -121,7 +127,6 @@ public class TransactionManager {
 		ArrayList<WritesetEntry> writeset = writesets.get(txID);
 		if (writeset != null) {
 			appendRecord(lm, txID);
-
 			for (WritesetEntry x : writeset) {
 				//tag is unused in this implementation:
 				long tag = 0;
@@ -162,16 +167,16 @@ public class TransactionManager {
 				results.add(recordsList.get(i));
 			}
 		}
-//		System.out.println("results: " + results.size());
 		String str = "COMMITED:" + txID;
 		results.add(new Record(txID, 0, str.getBytes()));
 
+		int offset = lm.getLogEndOffset();
 		List<Integer> offsets = new ArrayList<>();
-		int records = results.size(), cur = 0, offset = lm.getLogEndOffset();
+		int records = results.size(), cur = 0;
 		while (cur < records) {
 			int curLen = 0, start = cur, end = cur;
 			Record r = results.get(cur);
-			int recordLen = 3 * Long.BYTES + r.value.length;
+			int recordLen = r.len();
 			while (curLen +  recordLen < 128) {
 				end = cur;
 				curLen += recordLen;
@@ -180,19 +185,14 @@ public class TransactionManager {
 					break;
 				}
 				r = results.get(cur);
-				recordLen = 3 * Long.BYTES + r.value.length;
+				recordLen = r.len();
 			}
-//			System.out.println("s: " + start + ":" + end + ":" + curLen);
 			ByteBuffer ret = ByteBuffer.allocate(curLen);
 			for (int i = start; i <= end; i++) {
 				Record record = results.get(i);
-				int r_len = 2 * Long.BYTES + record.value.length;
-				ret.putLong(r_len);
-				ret.putLong(txID);
-				ret.putLong(record.key);
-				ret.put(record.value);
+				ret.put(record.serialize());
 				offsets.add(offset);
-				offset += Long.BYTES + r_len;
+				offset += record.len();
 			}
 			lm.appendLogRecord(ret.array());
 		}
@@ -208,9 +208,11 @@ public class TransactionManager {
 		HashMap<Long, ArrayList<Integer>> tags = new HashMap<>();
 		int offset = lm.getLogTruncationOffset();
 		while (offset < lm.getLogEndOffset()) {
-			byte[] length = lm.readLogRecord(offset, Long.BYTES);
+			byte[] length = lm.readLogRecord(offset, Byte.BYTES);
 			ByteBuffer bb = ByteBuffer.wrap(length);
-			byte[] content = lm.readLogRecord(offset + Long.BYTES, (int) bb.getLong());
+			int len = bb.get();
+
+			byte[] content = lm.readLogRecord(offset + Byte.BYTES, (int) len);
 			Record record = deserialize(content);
 			String recordStr = new String(record.value);
 			if (recordStr.startsWith("COMMITED")) {
@@ -221,7 +223,7 @@ public class TransactionManager {
 				tags.putIfAbsent(record.txID, new ArrayList<>());
 				tags.get(record.txID).add(offset);
 			}
-			offset = Math.max(offset + Long.BYTES + content.length, lm.getLogTruncationOffset());
+			offset = Math.max(offset + Byte.BYTES + content.length, lm.getLogTruncationOffset());
 		}
 		for (long txID : txnLogRecords.keySet()) {
 			if (!successfulTxns.contains(txID)) {
