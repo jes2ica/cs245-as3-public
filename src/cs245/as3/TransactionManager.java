@@ -1,13 +1,8 @@
 package cs245.as3;
 
-import java.io.IOException;
-import java.lang.reflect.Array;
-import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.*;
 
-import cs245.as3.driver.LogManagerImpl;
-import cs245.as3.driver.LogManagerTests;
 import cs245.as3.interfaces.LogManager;
 import cs245.as3.interfaces.StorageManager;
 import cs245.as3.interfaces.StorageManager.TaggedValue;
